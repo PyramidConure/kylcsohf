@@ -1,5 +1,6 @@
 from datetime import date
 import logging
+import sqlite3
 
 from PySide6.QtCore import QSize, QThreadPool, QTimer, Qt, Slot
 from PySide6.QtGui import QColor, QPalette
@@ -258,6 +259,10 @@ class Window(QMainWindow):
         self.navigate("settings")
         self.stack.currentWidget().tabs.setCurrentIndex(3)
 
+    def open_account_chat(self, account_id):
+        self.page("chat").open_account(account_id)
+        self.navigate("chat")
+
     def guard(self, fn):
         try:
             fn()
@@ -326,6 +331,14 @@ class Window(QMainWindow):
             self.notice("Дождитесь завершения операции.")
             event.ignore()
         else:
+            try:
+                self.page("chat").flush_draft()
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self.error("Не удалось сохранить черновик чата: " + str(error))
+                event.ignore()
+                return
+            self.timer.stop()
+            self.clock.timer.stop()
             super().closeEvent(event)
 
     def theme(self):
@@ -381,6 +394,7 @@ def stylesheet(dark):
     #chatRail, #chatRail QLabel {{ background:{card}; }}
     #chatRail {{ border:1px solid {border}; border-radius:10px; }}
     #chatComposer {{ background:{card}; border:1px solid {border}; border-radius:14px; }}
+    #chatComposer QLabel {{ background:transparent; }}
     QPlainTextEdit#chatInput {{ background:transparent; border:0; padding:2px; }}
     #chatFootnote {{ color:{muted}; font-size:11px; }}
     #chatHero {{ font-size:29px; font-weight:700; }}

@@ -1,9 +1,11 @@
 import os
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from threading import Event
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -37,6 +39,8 @@ class ChatTests(unittest.TestCase):
 
     def test_migration_preserves_accounts_and_tasks(self):
         account = self.db.save_account(account_data())
+        task = self.db.tasks(account)[0]
+        self.db.complete(task["id"], True)
         before = self.db.tasks(account)
         with self.db.connect() as cx:
             cx.executescript("DROP TABLE chat_messages; DROP TABLE chats; PRAGMA user_version=1;")
@@ -48,6 +52,8 @@ class ChatTests(unittest.TestCase):
 
     def test_context_history_and_key_are_kept_separate(self):
         account = self.db.save_account(account_data())
+        task = self.db.tasks(account)[0]
+        self.db.complete(task["id"], True)
         chat = self.store.create(account)
         self.http.json.side_effect = [answer("Идея первого ролика"), answer("Продолжение плана")]
         self.service.send(chat, "Предложи идею")
@@ -57,6 +63,10 @@ class ChatTests(unittest.TestCase):
         self.assertFalse(request["json"]["store"])
         history = request["json"]["input"]
         self.assertIn("Справочный контекст", history[0]["content"])
+        progress = json.loads(history[0]["content"].split("\n", 1)[1])["preparation"]
+        self.assertEqual(progress["completed"], 1)
+        self.assertIn(task["title"], progress["completed_tasks"])
+        self.assertNotIn(task["title"], [item["title"] for item in progress["next_tasks"]])
         self.assertEqual([row["role"] for row in history], ["user", "user", "assistant", "user"])
         self.assertEqual(history[-2]["content"], "Идея первого ролика")
         with self.db.connect() as cx:
@@ -123,6 +133,67 @@ class ChatTests(unittest.TestCase):
         restore_database(backup, self.root / "restored.sqlite3")
         restored = Database(self.root / "restored.sqlite3")
         self.assertEqual(ChatStore(restored).messages(chat)[0]["body"], "Сохранённый вопрос")
+
+    def test_search_and_export_keep_text_models_and_failures(self):
+        account = self.db.save_account(account_data())
+        chat = self.store.create(account, "gpt-4o")
+        message = self.store.begin(chat, "Сценарий знакомства")
+        self.store.finish(message, "Уникальная ПАЛИТРА персонажа", "gpt-4o")
+        failed = self.store.begin(chat, "Ещё вопрос")
+        self.store.fail(failed, "Проверьте соединение")
+        self.assertEqual(self.store.matching_chats("палитра"), {chat})
+        self.assertEqual(self.store.matching_chats("нет совпадений"), set())
+        exported = self.store.export_markdown(chat)
+        for text in ("Тест", "Уникальная ПАЛИТРА", "gpt-4o", "Проверьте соединение"):
+            self.assertIn(text, exported)
+        self.assertNotIn(self.vault[KEY_NAME], exported)
+
+    def test_drafts_restore_separately_and_account_chat_is_reused(self):
+        app = QApplication.instance() or QApplication([])
+        first = self.db.save_account(account_data())
+        second = self.db.save_account(account_data("YouTube"))
+        window = Window(self.db, self.vault)
+        self.addCleanup(window.close)
+        window.show()
+        window.open_account_chat(first)
+        page = window.page("chat")
+        first_chat = page.chat_id
+        page.editor.setPlainText("Черновик для Instagram")
+        window.open_account_chat(second)
+        self.assertEqual(self.store.draft(first_chat)["body"], "Черновик для Instagram")
+        second_chat = page.chat_id
+        page.editor.setPlainText("Черновик для YouTube")
+        page.new_chat()
+        page.account.setCurrentIndex(page.account.findData(second))
+        page.editor.setPlainText("Новая отдельная беседа")
+        window.close()
+        reopened = Window(self.db, self.vault)
+        self.addCleanup(reopened.close)
+        reopened.show()
+        reopened.navigate("chat")
+        restored = reopened.page("chat")
+        self.assertEqual(restored.editor.toPlainText(), "Новая отдельная беседа")
+        self.assertEqual(restored.account.currentData(), second)
+        reopened.open_account_chat(first)
+        self.assertEqual(restored.chat_id, first_chat)
+        self.assertEqual(restored.editor.toPlainText(), "Черновик для Instagram")
+        reopened.open_account_chat(second)
+        self.assertEqual(restored.chat_id, second_chat)
+        self.assertEqual(restored.editor.toPlainText(), "Черновик для YouTube")
+        restored.editor.clear()
+        self.assertFalse(restored.send_button.isEnabled())
+        exported = self.root / "conversation.md"
+        with patch("creator_control.ui.chat.QFileDialog.getSaveFileName", return_value=(str(exported), "")):
+            restored.export_button.click()
+        self.assertTrue(exported.is_file())
+        app.processEvents()
+        errors = []
+        reopened.error = errors.append
+        with patch.object(restored.store, "save_draft", side_effect=sqlite3.OperationalError("disk full")):
+            self.assertFalse(reopened.close())
+        self.assertTrue(reopened.isVisible())
+        self.assertIn("Не удалось сохранить", errors[0])
+        reopened.close()
 
     def test_chat_stays_responsive_and_saves_reply(self):
         app = QApplication.instance() or QApplication([])

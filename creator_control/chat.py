@@ -55,6 +55,47 @@ class ChatStore:
     def messages(self, identifier):
         return self.db.query("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY id", identifier)
 
+    def matching_chats(self, text):
+        needle = text.casefold().strip()
+        rows = self.db.query("""SELECT c.id,c.title,a.name AS account,m.body FROM chats c
+                                LEFT JOIN accounts a ON a.id=c.account_id
+                                LEFT JOIN chat_messages m ON m.chat_id=c.id""")
+        return {row["id"] for row in rows if needle in "\n".join(
+            str(row[key] or "") for key in ("title", "account", "body")).casefold()}
+
+    def draft(self, identifier):
+        try:
+            data = json.loads(self.db.setting(f"chat_draft/{identifier or 'new'}", "{}"))
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict) or not isinstance(data.get("body", ""), str):
+            data = {}
+        return {"body": data.get("body", ""), "account_id": data.get("account_id")}
+
+    def save_draft(self, identifier, text, account_id=None):
+        key = f"chat_draft/{identifier or 'new'}"
+        with self.db.connect() as cx:
+            if text or account_id is not None:
+                cx.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(
+                    {"body": text, "account_id": account_id}, ensure_ascii=False)))
+            else:
+                cx.execute("DELETE FROM settings WHERE key=?", (key,))
+
+    def export_markdown(self, identifier):
+        chat = self.db.get("SELECT c.*,a.name AS account FROM chats c LEFT JOIN accounts a "
+                           "ON a.id=c.account_id WHERE c.id=?", identifier)
+        if chat is None:
+            raise ValueError("Выберите беседу для экспорта.")
+        parts = ["# " + chat["title"], "Создано: " + chat["created"]]
+        if chat["account"]:
+            parts.append("Аккаунт: " + chat["account"])
+        for message in self.messages(identifier):
+            author = "Вы" if message["role"] == "user" else message["model"] or "ИИ-помощник"
+            parts.extend(["---", "## " + author + " · " + message["created"], message["body"]])
+            if message["state"] != "completed":
+                parts.append("Статус: " + (message["error"] or "Ожидается ответ"))
+        return "\n\n".join(parts) + "\n"
+
     def begin(self, identifier, text, model=None):
         text = text.strip()
         if not text or len(text) > 16_000:
@@ -158,6 +199,13 @@ class ChatService:
                 context = {field: account[field] for field in
                            ("platform", "name", "topic", "country", "language", "timezone",
                             "subtopics", "keywords", "ideas")}
+                tasks = self.db.tasks(chat["account_id"])
+                context["preparation"] = {
+                    "completed": sum(bool(task["done"]) for task in tasks), "total": len(tasks),
+                    "next_tasks": [{"title": task["title"], "due": task["due"]}
+                                   for task in tasks if not task["done"]][:20],
+                    "completed_tasks": [task["title"] for task in tasks if task["done"]][:30],
+                }
                 history.append({"role": "user", "content": "Справочный контекст выбранного аккаунта\n" +
                                 json.dumps(context, ensure_ascii=False)})
             history.extend({"role": row["role"], "content": row["body"]}

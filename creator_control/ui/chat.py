@@ -1,7 +1,10 @@
+from datetime import datetime
+from pathlib import Path
+
 from PySide6.QtCore import QByteArray, QThreadPool, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QTextDocument
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QProgressBar,
+    QAbstractItemView, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QProgressBar,
     QScrollArea, QSplitter, QTextBrowser, QVBoxLayout, QWidget,
 )
 
@@ -11,6 +14,19 @@ from .common import Page, Worker, button, choices, label, surface
 
 class Composer(QPlainTextEdit):
     submitted = Signal()
+
+    def fit_height(self):
+        block, lines = self.document().firstBlock(), 0
+        while block.isValid() and lines < 7:
+            lines += max(1, block.layout().lineCount())
+            block = block.next()
+        height = min(102, max(54, lines * self.fontMetrics().lineSpacing() + 16))
+        if self.height() != height:
+            self.setFixedHeight(height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.fit_height)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
@@ -64,12 +80,17 @@ class Chat(Page):
         self.layout.itemAt(0).widget().hide()
         self.store = ChatStore(self.db)
         self.service = ChatService(self.db, self.vault)
-        self.chat_id = None
+        last_chat = self.db.setting("chat_last", "")
+        self.chat_id = int(last_chat) if last_chat.isdigit() and self.db.get(
+            "SELECT id FROM chats WHERE id=?", int(last_chat)) else None
         self.draft_model = self.db.setting("chat_model", DEFAULT_MODEL)
         self.busy = False
         self.request_kind = None
         self.worker = None
-        self.drafts = {}
+        self.draft_account = self.store.draft(None)["account_id"]
+        self.auto_scroll = True
+        self.rendered = None
+        self.configured = False
         self.last_text = ""
         self.split = QSplitter()
         self.split.setChildrenCollapsible(False)
@@ -80,7 +101,7 @@ class Chat(Page):
         self.new_button = button("＋  Новая беседа", self.guard(self.new_chat), True)
         rail_box.addWidget(self.new_button)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Поиск бесед")
+        self.search.setPlaceholderText("Поиск в чатах")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.filter_history)
         rail_box.addWidget(self.search)
@@ -88,6 +109,7 @@ class Chat(Page):
         self.sessions = QListWidget()
         self.sessions.setObjectName("chatHistory")
         self.sessions.setWordWrap(True)
+        self.sessions.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.sessions.setAccessibleName("История бесед")
         self.sessions.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
         self.sessions.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -122,15 +144,25 @@ class Chat(Page):
         self.catalog_button.setToolTip("Обновить доступные GPT-модели через OpenAI")
         top.addWidget(self.catalog_button)
         top.addStretch(1)
+        self.export_button = button("Экспорт", self.guard(self.export_chat))
+        top.addWidget(self.export_button)
         top.addWidget(button("Настройки", self.window.open_chat_settings))
         center.addLayout(top)
+        heading = QHBoxLayout()
         self.thread_title = label("Новая беседа", "section")
-        center.addWidget(self.thread_title)
+        heading.addWidget(self.thread_title, 1)
+        self.latest_button = button("Вниз ↓", self.to_latest)
+        self.latest_button.hide()
+        heading.addWidget(self.latest_button)
+        center.addLayout(heading)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.verticalScrollBar().rangeChanged.connect(
-            lambda _minimum, maximum: self.scroll.verticalScrollBar().setValue(maximum))
+        bar = self.scroll.verticalScrollBar()
+        bar.rangeChanged.connect(self.adjust_scroll)
+        bar.sliderMoved.connect(lambda _value: self.user_scrolled())
+        bar.actionTriggered.connect(lambda _action: QTimer.singleShot(0, self.user_scrolled))
+        bar.valueChanged.connect(lambda _value: self.update_latest_button())
         self.canvas = QWidget()
         self.canvas.setObjectName("chatCanvas")
         self.messages = QVBoxLayout(self.canvas)
@@ -156,12 +188,18 @@ class Chat(Page):
         footer = QHBoxLayout()
         self.account = QComboBox()
         self.account.setMinimumContentsLength(11)
-        self.account.setMaximumWidth(265)
+        self.account.setMaximumWidth(225)
         self.account.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.account.setAccessibleName("Контекст аккаунта")
         self.account.currentIndexChanged.connect(self.update_context)
         footer.addWidget(self.account)
+        self.next_button = button("Следующий шаг", self.preparation_prompt)
+        self.next_button.setToolTip("Подготовить вопрос о задачах выбранного аккаунта")
+        footer.addWidget(self.next_button)
         footer.addStretch(1)
+        self.counter = label("", "chatFootnote")
+        self.counter.setWordWrap(False)
+        footer.addWidget(self.counter)
         self.send_button = button("↑", self.guard(self.send), True)
         self.send_button.setFixedSize(39, 37)
         self.send_button.setAccessibleName("Отправить сообщение")
@@ -177,15 +215,85 @@ class Chat(Page):
         center.addWidget(self.progress)
         self.split.addWidget(work)
         self.split.setSizes([195, 765])
+        self.draft_timer = QTimer(self)
+        self.draft_timer.setSingleShot(True)
+        self.draft_timer.setInterval(400)
+        self.draft_timer.timeout.connect(self.guard(self.flush_draft))
+        self.editor.textChanged.connect(self.editor_changed)
+        self.account.currentIndexChanged.connect(self.schedule_draft)
+        self.editor.setPlainText(self.store.draft(self.chat_id)["body"])
+        self.shortcuts = []
+        for keys, callback in (("Ctrl+N", self.guard(self.new_chat)), ("Ctrl+F", self.search.setFocus)):
+            shortcut = QShortcut(QKeySequence(keys), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(callback)
+            self.shortcuts.append(shortcut)
 
     def toggle_history(self):
         self.rail.setVisible(self.history_toggle.isChecked())
+        self.db.settings({"chat_history_visible": "1" if self.history_toggle.isChecked() else "0"})
 
     def filter_history(self, *_args):
-        needle = self.search.text().casefold().strip()
+        matches = self.store.matching_chats(self.search.text())
         for index in range(self.sessions.count()):
             item = self.sessions.item(index)
-            item.setHidden(needle not in item.toolTip().casefold())
+            item.setHidden(item.data(Qt.ItemDataRole.UserRole) not in matches)
+
+    def schedule_draft(self, *_args):
+        self.draft_timer.start()
+
+    def editor_changed(self):
+        self.schedule_draft()
+        self.update_composer()
+
+    def update_composer(self):
+        length = len(self.editor.toPlainText())
+        self.counter.setText(f"{length:,} / 16 000".replace(",", " ") if length else "")
+        self.send_button.setEnabled(self.configured and not self.busy and
+                                    0 < len(self.editor.toPlainText().strip()) <= 16_000)
+        self.editor.fit_height()
+
+    def flush_draft(self):
+        self.draft_timer.stop()
+        if self.db.path.exists():
+            self.store.save_draft(self.chat_id, self.editor.toPlainText(),
+                                  self.draft_account if self.chat_id is None else None)
+            self.db.settings({"chat_last": str(self.chat_id or "")})
+
+    def to_latest(self):
+        self.auto_scroll = True
+        self.adjust_scroll()
+
+    def adjust_scroll(self, *_args):
+        if self.auto_scroll:
+            self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
+        self.update_latest_button()
+
+    def user_scrolled(self):
+        bar = self.scroll.verticalScrollBar()
+        self.auto_scroll = bar.maximum() - bar.value() <= 24
+        self.update_latest_button()
+
+    def update_latest_button(self):
+        bar = self.scroll.verticalScrollBar()
+        self.latest_button.setVisible(bar.maximum() - bar.value() > 24)
+
+    def preparation_prompt(self):
+        if self.account.currentData() is not None:
+            self.use_prompt("Посмотри фактический прогресс подготовки выбранного аккаунта. "
+                            "Предложи три следующих выполнимых шага и подготовь нужные тексты. "
+                            "Отдели готовые материалы от действий, которые владельцу ещё нужно выполнить.")
+
+    def export_chat(self):
+        if self.chat_id is None:
+            raise ValueError("Сначала выберите сохранённую беседу.")
+        text = self.store.export_markdown(self.chat_id)
+        default = self.window.data_folder("chats") / f"chat-{self.chat_id}-{datetime.now():%Y%m%d-%H%M%S}.md"
+        path, _filter = QFileDialog.getSaveFileName(self, "Экспорт беседы", str(default), "Markdown (*.md)")
+        if path:
+            with Path(path).open("x", encoding="utf-8") as target:
+                target.write(text)
+            self.window.notice("Беседа сохранена: " + path)
 
     def history_menu(self, position):
         item = self.sessions.itemAt(position)
@@ -219,7 +327,8 @@ class Chat(Page):
         row = self.db.get("SELECT * FROM chats WHERE id=?", selected) if selected is not None else None
         self.thread_title.setText(row["title"] if row else "Новая беседа")
         choices(self.account, ((r["name"], r["id"]) for r in self.db.accounts()),
-                selected=row["account_id"] if row else self.account.currentData(), first="Без аккаунта")
+                selected=row["account_id"] if row else self.draft_account,
+                first="Без аккаунта")
         if row and row["account_id"] is None:
             self.account.setCurrentIndex(0)
         self.account.setEnabled(self.chat_id is None and not self.busy)
@@ -227,12 +336,15 @@ class Chat(Page):
         models = list(dict.fromkeys([*saved_models(self.db), selected_model]))
         choices(self.model, ((model, model) for model in models), selected=selected_model)
         self.model.setEnabled(not self.busy)
-        configured = bool(self.vault.get(KEY_NAME))
-        self.send_button.setEnabled(configured and not self.busy)
+        configured = self.configured = bool(self.vault.get(KEY_NAME))
+        self.update_composer()
         self.catalog_button.setEnabled(configured and not self.busy)
         self.new_button.setEnabled(not self.busy)
         self.sessions.setEnabled(not self.busy)
         self.editor.setEnabled(not self.busy)
+        self.export_button.setEnabled(self.chat_id is not None and not self.busy)
+        self.history_toggle.setChecked(self.db.setting("chat_history_visible", "1") != "0")
+        self.rail.setVisible(self.history_toggle.isChecked())
         self.connection.setText("" if configured else "Добавьте API-ключ, чтобы получать ответы.")
         self.connection.setVisible(not configured)
         self.configure_button.setVisible(not configured)
@@ -254,7 +366,11 @@ class Chat(Page):
         self.account.setToolTip("Тематика, аудитория и идеи этого аккаунта будут переданы с сообщением."
                                 if with_account else "Выберите аккаунт для новой беседы, если нужен его контекст.")
         self.context.setText("Enter — отправить · Shift+Enter — новая строка" +
-                             (" · Контекст выбранного аккаунта включён" if with_account else ""))
+                             (" · Учтены аккаунт и задачи подготовки" if with_account else ""))
+        self.next_button.setVisible(with_account)
+        self.next_button.setEnabled(not self.busy)
+        if self.chat_id is None:
+            self.draft_account = self.account.currentData()
 
     def use_prompt(self, text):
         if not self.busy:
@@ -264,10 +380,31 @@ class Chat(Page):
     def new_chat(self):
         if self.busy:
             raise ValueError("Дождитесь ответа.")
-        self.drafts[self.chat_id] = self.editor.toPlainText()
+        self.flush_draft()
         self.chat_id = None
-        self.editor.setPlainText(self.drafts.get(None, ""))
+        draft = self.store.draft(None)
+        self.draft_account = draft["account_id"]
+        self.editor.setPlainText(draft["body"])
+        self.db.settings({"chat_last": ""})
         self.refresh()
+        self.editor.setFocus()
+
+    def open_account(self, account_id):
+        if self.busy:
+            raise ValueError("Дождитесь текущего ответа.")
+        account = self.db.account(account_id)
+        if account is None:
+            raise ValueError("Аккаунт не найден.")
+        self.flush_draft()
+        chat = self.db.get("SELECT id FROM chats WHERE account_id=? ORDER BY updated DESC,id DESC", account_id)
+        self.chat_id = chat["id"] if chat else self.store.create(account_id)
+        if chat is None:
+            self.store.rename(self.chat_id, "Подготовка · " + account["name"])
+        self.editor.setPlainText(self.store.draft(self.chat_id)["body"])
+        self.db.settings({"chat_last": str(self.chat_id)})
+        self.refresh()
+        if not self.editor.toPlainText() and not self.store.messages(self.chat_id):
+            self.preparation_prompt()
         self.editor.setFocus()
 
     def select_chat(self):
@@ -277,20 +414,27 @@ class Chat(Page):
         selected = item.data(Qt.ItemDataRole.UserRole)
         if selected == self.chat_id:
             return
-        self.drafts[self.chat_id] = self.editor.toPlainText()
+        self.flush_draft()
         self.chat_id = selected
-        self.editor.setPlainText(self.drafts.get(selected, ""))
+        self.editor.setPlainText(self.store.draft(selected)["body"])
+        self.db.settings({"chat_last": str(selected)})
         self.refresh()
 
     def show_messages(self):
+        rows = self.store.messages(self.chat_id) if self.chat_id is not None else []
+        if self.busy and self.request_kind == "message" and not any(row["state"] == "pending" for row in rows):
+            rows.append({"role": "user", "body": self.last_text, "state": "pending", "error": "", "model": ""})
+        signature = (self.chat_id, [(row.get("id"), row["state"], row["body"], row.get("model")) for row in rows])
+        if signature == self.rendered:
+            return
+        if self.rendered is None or self.rendered[0] != self.chat_id:
+            self.auto_scroll = True
+        self.rendered = signature
         while self.messages.count():
             item = self.messages.takeAt(0)
             if item.widget():
                 item.widget().hide()
                 item.widget().deleteLater()
-        rows = self.store.messages(self.chat_id) if self.chat_id is not None else []
-        if self.busy and self.request_kind == "message" and not any(row["state"] == "pending" for row in rows):
-            rows.append({"role": "user", "body": self.last_text, "state": "pending", "error": "", "model": ""})
         if not rows:
             self.messages.addStretch(1)
             welcome = QWidget()
@@ -332,6 +476,9 @@ class Chat(Page):
             footer = QHBoxLayout()
             if message["state"] == "failed":
                 footer.addWidget(label(message["error"], "muted"), 1)
+                retry = button("В поле ввода", lambda _checked, text=message["body"]: self.use_prompt(text))
+                retry.setObjectName("chatCopy")
+                footer.addWidget(retry)
             elif message["state"] == "pending":
                 footer.addWidget(label("Готовлю ответ…", "muted"), 1)
             else:
@@ -347,8 +494,7 @@ class Chat(Page):
             else:
                 self.messages.addWidget(bubble)
         self.messages.addStretch(1)
-        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(
-            self.scroll.verticalScrollBar().maximum()))
+        QTimer.singleShot(0, self.adjust_scroll)
 
     def set_busy(self, kind):
         self.busy = True
@@ -367,8 +513,10 @@ class Chat(Page):
         self.select_model()
         model = validate_model(self.model.currentText().strip())
         if self.chat_id is None:
+            self.store.save_draft(None, "")
             self.chat_id = self.store.create(self.account.currentData(), model)
-            self.drafts.pop(None, None)
+        self.auto_scroll = True
+        self.flush_draft()
         self.last_text = text
         chat_id = self.chat_id
         self.set_busy("message")
@@ -395,7 +543,7 @@ class Chat(Page):
     def finished(self, _answer):
         self.end_request()
         self.editor.clear()
-        self.drafts.pop(self.chat_id, None)
+        self.flush_draft()
         self.refresh()
 
     @Slot(object)

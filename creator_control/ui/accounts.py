@@ -71,7 +71,8 @@ class Accounts(Page):
         self.advice = label(US_ADVICE, "muted")
         right.addWidget(self.advice)
         right.addLayout(toolbar(button("Сохранить", self.guard(self.save), True),
-                                button("Открыть профиль", self.guard(self.profile))))
+                                button("Открыть профиль", self.guard(self.profile)),
+                                button("ИИ-план", self.guard(self.open_chat))))
         self.link = label("Сначала сохраните карточку.", "section")
         right.addWidget(self.link)
         right.addLayout(toolbar(button("Подключить OAuth", self.guard(self.authorize)),
@@ -155,6 +156,9 @@ class Accounts(Page):
     def selected(self):
         return self.db.account(required(self.editing, "сохранённый аккаунт"))
 
+    def open_chat(self):
+        self.window.open_account_chat(self.selected()["id"])
+
     def profile(self):
         account = self.selected()
         if not account["profile"]:
@@ -222,8 +226,10 @@ class Warmup(Page):
         self.account.setMinimumWidth(215)
         self.account.currentIndexChanged.connect(self.guard(self.show_calendar))
         self.ld = button("Открыть в LDPlayer", self.guard(self.open_app))
+        self.ai = button("ИИ-план", self.guard(lambda: self.window.open_account_chat(
+            required(self.account.currentData(), "аккаунт"))))
         self.add_account = button("Добавить аккаунт", lambda: self.window.navigate("accounts"), True)
-        self.layout.addLayout(toolbar(self.account, self.ld, self.add_account))
+        self.layout.addLayout(toolbar(self.account, self.ld, self.ai, self.add_account))
         progress_card, progress_box = surface()
         self.layout.addWidget(progress_card)
         heading = QHBoxLayout()
@@ -311,6 +317,7 @@ class Warmup(Page):
             self.table.clearSelection()
         self.add_account.setVisible(account is None)
         self.account.setEnabled(account is not None)
+        self.ai.setEnabled(account is not None)
         self.ld.setVisible(account is not None)
         self.ld.setEnabled(bool(account and account["emulator"] is not None and self.db.setting("ldplayer")))
         self.ld.setToolTip("Укажите папку LDPlayer в настройках и его индекс в карточке аккаунта.")
