@@ -29,47 +29,67 @@ class ChatStore:
         return self.db.query("""SELECT c.*,a.name AS account FROM chats c
                                 LEFT JOIN accounts a ON a.id=c.account_id ORDER BY c.updated DESC,c.id DESC""")
 
-    def create(self, account_id=None):
+    def create(self, account_id=None, model=None):
         stamp = now()
+        model = validate_model(model or self.db.setting("chat_model", DEFAULT_MODEL))
         with self.db.connect() as cx:
-            return cx.execute("INSERT INTO chats(title,account_id,created,updated) VALUES (?,?,?,?)",
-                              ("Новый чат", account_id, stamp, stamp)).lastrowid
+            return cx.execute("INSERT INTO chats(title,account_id,created,updated,model) VALUES (?,?,?,?,?)",
+                              ("Новый чат", account_id, stamp, stamp, model)).lastrowid
+
+    def set_model(self, identifier, model):
+        model = validate_model(model)
+        with self.db.connect() as cx:
+            if not cx.execute("""UPDATE chats SET model=? WHERE id=? AND NOT EXISTS (
+                                SELECT 1 FROM chat_messages WHERE chat_id=chats.id AND state='pending')""",
+                              (model, identifier)).rowcount:
+                raise ValueError("Дождитесь текущего ответа перед сменой модели.")
+        remember_models(self.db, [model])
+
+    def rename(self, identifier, title):
+        title = title.strip()[:120]
+        if not title:
+            raise ValueError("Введите название беседы.")
+        with self.db.connect() as cx:
+            cx.execute("UPDATE chats SET title=? WHERE id=?", (title, identifier))
 
     def messages(self, identifier):
         return self.db.query("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY id", identifier)
 
-    def begin(self, identifier, text):
+    def begin(self, identifier, text, model=None):
         text = text.strip()
         if not text or len(text) > 16_000:
             raise ValueError("Введите сообщение длиной до 16 000 символов.")
         with self.db.connect() as cx:
             cx.execute("BEGIN IMMEDIATE")
-            chat = cx.execute("SELECT title FROM chats WHERE id=?", (identifier,)).fetchone()
+            chat = cx.execute("SELECT title,model FROM chats WHERE id=?", (identifier,)).fetchone()
             if not chat:
                 raise ValueError("Чат не найден.")
             size = cx.execute("""SELECT COALESCE(SUM(length(body)),0) FROM chat_messages
                                  WHERE chat_id=? AND state='completed'""", (identifier,)).fetchone()[0]
             if size + len(text) > 120_000:
                 raise ValueError("Переписка стала большой. Начните новый чат, сохранив нужные выводы.")
+            model = validate_model(model or chat["model"] or self.db.setting("chat_model", DEFAULT_MODEL))
             try:
-                message = cx.execute("""INSERT INTO chat_messages(chat_id,role,body,state,created)
-                                        VALUES (?,'user',?,'pending',?)""", (identifier, text, now())).lastrowid
+                message = cx.execute("""INSERT INTO chat_messages(chat_id,role,body,state,created,model)
+                                        VALUES (?,'user',?,'pending',?,?)""",
+                                     (identifier, text, now(), model)).lastrowid
             except sqlite3.IntegrityError:
                 raise ValueError("В этом чате уже ожидается ответ.") from None
             title = " ".join(text.split())[:55] if chat["title"] == "Новый чат" else chat["title"]
-            cx.execute("UPDATE chats SET title=?,updated=? WHERE id=?", (title, now(), identifier))
+            cx.execute("UPDATE chats SET title=?,updated=?,model=? WHERE id=?", (title, now(), model, identifier))
             return message
 
-    def finish(self, message_id, answer):
+    def finish(self, message_id, answer, model=None):
         with self.db.connect() as cx:
             cx.execute("BEGIN IMMEDIATE")
-            row = cx.execute("SELECT chat_id FROM chat_messages WHERE id=? AND state='pending' AND role='user'",
+            row = cx.execute("SELECT chat_id,model FROM chat_messages WHERE id=? AND state='pending' AND role='user'",
                              (message_id,)).fetchone()
             if not row:
                 raise ValueError("Состояние запроса изменилось.")
             cx.execute("UPDATE chat_messages SET state='completed' WHERE id=?", (message_id,))
-            cx.execute("""INSERT INTO chat_messages(chat_id,role,body,state,reply_to,created)
-                          VALUES (?,'assistant',?,'completed',?,?)""", (row["chat_id"], answer, message_id, now()))
+            cx.execute("""INSERT INTO chat_messages(chat_id,role,body,state,reply_to,created,model)
+                          VALUES (?,'assistant',?,'completed',?,?,?)""",
+                       (row["chat_id"], answer, message_id, now(), model or row["model"]))
             cx.execute("UPDATE chats SET updated=? WHERE id=?", (now(), row["chat_id"]))
 
     def fail(self, message_id, error):
@@ -83,13 +103,36 @@ class ChatStore:
                           WHERE state='pending'""")
 
 
+def validate_model(model):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,100}", model):
+        raise ValueError("Укажите корректное имя GPT-модели.")
+    return model
+
+
+def saved_models(db):
+    try:
+        saved = json.loads(db.setting("chat_saved_models", "[]"))
+    except ValueError:
+        saved = []
+    if not isinstance(saved, list):
+        saved = []
+    rows = db.query("SELECT model FROM chats UNION SELECT model FROM chat_messages")
+    values = [db.setting("chat_model", DEFAULT_MODEL), *saved, *(row["model"] for row in rows)]
+    return list(dict.fromkeys(value for value in values if isinstance(value, str) and
+                              re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,100}", value)))
+
+
+def remember_models(db, models):
+    merged = list(dict.fromkeys([*saved_models(db), *(validate_model(model) for model in models)]))
+    db.settings({"chat_saved_models": json.dumps(merged)})
+    return merged
+
+
 def chat_config(db, vault):
     key = vault.get(KEY_NAME)
     if not isinstance(key, str) or not key.strip():
         raise ValueError("Добавьте OpenAI API-ключ в «Настройки → ИИ-чат».")
-    model = db.setting("chat_model", DEFAULT_MODEL)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,100}", model):
-        raise ValueError("Проверьте имя модели в настройках ИИ-чата.")
+    model = validate_model(db.setting("chat_model", DEFAULT_MODEL))
     limit = int(db.setting("chat_output_limit", "4096"))
     if not 256 <= limit <= 16_000:
         raise ValueError("Проверьте лимит ответа в настройках ИИ-чата.")
@@ -103,10 +146,13 @@ class ChatService:
 
     def send(self, chat_id, text):
         key, model, limit = chat_config(self.db, self.vault)
-        message_id = self.store.begin(chat_id, text)
+        chat = self.db.get("SELECT account_id,model FROM chats WHERE id=?", chat_id)
+        if not chat:
+            raise ValueError("Чат не найден.")
+        model = validate_model(chat["model"] or model)
+        message_id = self.store.begin(chat_id, text, model)
         try:
             history = []
-            chat = self.db.get("SELECT account_id FROM chats WHERE id=?", chat_id)
             if chat["account_id"] is not None:
                 account = self.db.account(chat["account_id"])
                 context = {field: account[field] for field in
@@ -129,7 +175,10 @@ class ChatService:
                 raise ValueError("OpenAI не вернул текст ответа. Сообщение сохранено, можно отправить его повторно.")
             if response["status"] == "incomplete":
                 answer += "\n\n*Ответ остановлен до завершения. Можно попросить продолжение.*"
-            self.store.finish(message_id, answer)
+            returned_model = response.get("model")
+            actual = returned_model if isinstance(returned_model, str) and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,100}", returned_model) else model
+            self.store.finish(message_id, answer, actual)
         except Exception as error:
             if isinstance(error, APIError):
                 details = {401: "Проверьте OpenAI API-ключ.", 403: "Проверьте доступ проекта к API.",
@@ -142,3 +191,13 @@ class ChatService:
             self.store.fail(message_id, message)
             raise ValueError(message) from None
         return answer
+
+    def catalog(self):
+        key, _model, _limit = chat_config(self.db, self.vault)
+        response = self.http.json("GET", "https://api.openai.com/v1/models", service="OpenAI",
+                                  headers={"Authorization": "Bearer " + key})
+        models = sorted({row["id"] for row in response.get("data", []) if isinstance(row, dict) and
+                         isinstance(row.get("id"), str) and
+                         re.fullmatch(r"(?:gpt-|chatgpt-|o[1-9])[A-Za-z0-9._:-]*", row["id"]) and
+                         not any(part in row["id"] for part in ("audio", "realtime", "transcri", "tts", "image"))})
+        return remember_models(self.db, models)

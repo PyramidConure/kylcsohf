@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QFileDialog, QTabWidget, QVBoxLayout, QWidget
 
 from ..db import https_url
-from ..chat import DEFAULT_MODEL, KEY_NAME
+from ..chat import DEFAULT_MODEL, KEY_NAME, remember_models, validate_model
 from ..tools import network_check
 from .common import Fields, Page, button, label, scroll, toolbar
 
@@ -107,14 +107,13 @@ class Settings(Page):
 
     def save_chat(self):
         data = self.chat_form.values()
-        model = data["model"].strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,100}", model):
-            raise ValueError("Укажите корректное имя модели.")
+        model = validate_model(data["model"].strip())
         key = data["key"]
         if key and (len(key) < 20 or any(c.isspace() for c in key)):
             raise ValueError("Проверьте API-ключ. Он должен быть без пробелов и переносов строки.")
         if key:
             self.vault.put(KEY_NAME, key)
+        remember_models(self.db, [model])
         self.db.settings({"chat_model": model, "chat_output_limit": str(data["limit"])})
         self.chat_form.widget("key").clear()
         self.chat_status.setText("API-ключ сохранён." if self.vault.get(KEY_NAME) else "API-ключ пока не добавлен.")

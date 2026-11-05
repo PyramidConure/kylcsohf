@@ -222,7 +222,7 @@ class Warmup(Page):
         self.account.setMinimumWidth(215)
         self.account.currentIndexChanged.connect(self.guard(self.show_calendar))
         self.ld = button("Открыть в LDPlayer", self.guard(self.open_app))
-        self.add_account = button("Добавить аккаунт", lambda: self.window.navigation.setCurrentRow(1), True)
+        self.add_account = button("Добавить аккаунт", lambda: self.window.navigate("accounts"), True)
         self.layout.addLayout(toolbar(self.account, self.ld, self.add_account))
         progress_card, progress_box = surface()
         self.layout.addWidget(progress_card)

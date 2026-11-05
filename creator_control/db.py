@@ -70,6 +70,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS chat_pending_turn ON chat_messages(chat_id)
 PRAGMA user_version = 2;
 """
 
+CHAT_MODEL_SCHEMA = """
+ALTER TABLE chats ADD COLUMN model TEXT NOT NULL DEFAULT '';
+ALTER TABLE chat_messages ADD COLUMN model TEXT NOT NULL DEFAULT '';
+PRAGMA user_version = 3;
+"""
+
 ACCOUNT_FIELDS = ("platform", "name", "profile", "created", "start", "kind", "topic", "country",
                   "language", "timezone", "duration", "owner", "emulator", "subtopics", "keywords",
                   "ideas", "prep_override")
@@ -99,10 +105,12 @@ class Database:
             if version == 0:
                 cx.execute("PRAGMA journal_mode=WAL")
                 cx.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + "\nCOMMIT;")
-            elif version not in (1, 2):
+            elif version not in (1, 2, 3):
                 raise ValueError(f"Версия базы {version} не поддерживается.")
             if version < 2:
                 cx.executescript("BEGIN IMMEDIATE;\n" + CHAT_SCHEMA + "\nCOMMIT;")
+            if version < 3:
+                cx.executescript("BEGIN IMMEDIATE;\n" + CHAT_MODEL_SCHEMA + "\nCOMMIT;")
 
     @contextmanager
     def connect(self):
@@ -398,7 +406,7 @@ def restore_database(backup, destination):
     try:
         source = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
         try:
-            if (source.execute("PRAGMA user_version").fetchone()[0] not in (1, 2) or
+            if (source.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 3) or
                     source.execute("PRAGMA integrity_check").fetchone()[0] != "ok"):
                 raise ValueError("Выберите целую резервную копию Creator Control Center.")
             target = sqlite3.connect(temporary)

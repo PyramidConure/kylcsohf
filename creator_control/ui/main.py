@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 from .accounts import Accounts, Warmup, task_rows
 from .common import Fields, Page, Table, Worker, button, choices, label, required, surface, toolbar
 from .chat import Chat
+from .clock import Clock
 from .library import Emulators, Videos
 from .operations import Analytics, Posts
 from .settings import Settings
@@ -26,11 +27,11 @@ class Overview(Page):
         row.setSpacing(10)
         self.cards = []
         for title, detail, page in (
-            ("Аккаунты", "Профили и подключения", 1), ("Видео", "Файлы в каталоге", 3),
-            ("В очереди", "Ожидают отправки", 4), ("Задачи к сроку", "Сегодня и просроченные", 7),
+            ("Аккаунты", "Профили и подключения", "accounts"), ("Видео", "Файлы в каталоге", "videos"),
+            ("В очереди", "Ожидают отправки", "posts"), ("Задачи к сроку", "Сегодня и просроченные", "tasks"),
         ):
             card, box = surface()
-            link = button(title + "  ›", lambda p=page: self.window.navigation.setCurrentRow(p))
+            link = button(title + "  ›", lambda _checked, p=page: self.window.navigate(p))
             link.setObjectName("metricLink")
             box.addWidget(link)
             value = label("0", "number")
@@ -50,7 +51,7 @@ class Overview(Page):
         self.table.setWordWrap(True)
         self.table.verticalHeader().setDefaultSectionSize(40)
         tasks.addWidget(self.table, 1)
-        tasks.addLayout(toolbar(button("Все задачи", lambda: self.window.navigation.setCurrentRow(7))))
+        tasks.addLayout(toolbar(button("Все задачи", lambda: self.window.navigate("tasks"))))
         content.addLayout(tasks, 1)
         side = QVBoxLayout()
         side.setSpacing(12)
@@ -59,15 +60,16 @@ class Overview(Page):
         box.addWidget(label("СЛЕДУЮЩИЙ ШАГ", "eyebrow"))
         self.next_title = label("", "section")
         self.next_detail = label("", "muted")
-        self.next_page = 1
-        self.next_action = button("", lambda: self.window.navigation.setCurrentRow(self.next_page), True)
+        self.next_page = "accounts"
+        self.next_action = button("", lambda: self.window.navigate(self.next_page), True)
         for item in (self.next_title, self.next_detail, self.next_action):
             box.addWidget(item)
         side.addWidget(next_card)
         quick, box = surface()
         box.addWidget(label("БЫСТРЫЙ ДОСТУП", "eyebrow"))
-        for title, page in (("Подготовка Instagram", 2), ("Новая публикация", 4), ("Проверка подключения", 9)):
-            link = button(title + "  ›", lambda p=page: self.quick_open(p))
+        for title, page in (("Подготовка Instagram", "warmup"), ("Новая публикация", "posts"),
+                            ("Проверка подключения", "settings")):
+            link = button(title + "  ›", lambda _checked, p=page: self.quick_open(p))
             link.setObjectName("metricLink")
             box.addWidget(link)
         side.addWidget(quick)
@@ -75,11 +77,11 @@ class Overview(Page):
         content.addLayout(side)
 
     def quick_open(self, page):
-        self.window.navigation.setCurrentRow(page)
+        self.window.navigate(page)
         current = self.window.stack.currentWidget()
-        if page == 4:
+        if page == "posts":
             current.new()
-        elif page == 9:
+        elif page == "settings":
             current.tabs.setCurrentIndex(2)
 
     def refresh(self):
@@ -95,22 +97,22 @@ class Overview(Page):
         self.table.fill(task_rows(tasks[:20]))
         if not values[0]:
             step = ("Добавьте аккаунт", "Создайте карточку Instagram или YouTube. Для Instagram сразу появится план подготовки.",
-                    "Открыть аккаунты", 1)
+                    "Открыть аккаунты", "accounts")
         elif any(p["state"] in {"committing", "restored"} for p in posts):
             step = ("Сверьте публикации", "Есть записи, результат которых нужно проверить на платформе.",
-                    "Открыть очередь", 4)
+                    "Открыть очередь", "posts")
         elif values[3]:
             step = ("Разберите задачи к сроку", "На сегодня или раньше запланированы незавершённые шаги.",
-                    "Открыть задачи", 7)
+                    "Открыть задачи", "tasks")
         elif not values[1]:
             step = ("Добавьте видео", "Импортируйте исходники. FFprobe проверит дорожки и параметры файла.",
-                    "Открыть видео", 3)
+                    "Открыть видео", "videos")
         elif any(p["state"] == "planned" and p["due"] <= current_time for p in posts):
             step = ("Проверьте очередь", "У некоторых публикаций наступило время отправки.",
-                    "Открыть очередь", 4)
+                    "Открыть очередь", "posts")
         else:
             step = ("Спланируйте выпуск", "Соберите черновик из видео и назначьте дату в очереди.",
-                    "Открыть очередь", 4)
+                    "Открыть очередь", "posts")
         title, detail, action, self.next_page = step
         self.next_title.setText(title)
         self.next_detail.setText(detail)
@@ -149,10 +151,12 @@ class Tasks(Page):
 
 
 PAGES = (
-    ("Обзор", Overview), ("Аккаунты", Accounts), ("Прогрев Instagram", Warmup), ("Видео", Videos),
-    ("Публикации", Posts), ("Аналитика", Analytics), ("Эмуляторы", Emulators), ("Задачи", Tasks),
-    ("ИИ-чат", Chat), ("Настройки", Settings),
+    ("overview", "Обзор", Overview), ("chat", "ИИ-чат", Chat), ("accounts", "Аккаунты", Accounts),
+    ("warmup", "Прогрев Instagram", Warmup), ("videos", "Видео", Videos),
+    ("posts", "Публикации", Posts), ("analytics", "Аналитика", Analytics),
+    ("emulators", "Эмуляторы", Emulators), ("tasks", "Задачи", Tasks), ("settings", "Настройки", Settings),
 )
+PAGE_INDEX = {key: index for index, (key, _title, _page) in enumerate(PAGES)}
 
 
 class Window(QMainWindow):
@@ -195,6 +199,8 @@ class Window(QMainWindow):
         top.addWidget(self.title, 1)
         self.mode = label("", "mode")
         self.mode.setWordWrap(False)
+        self.clock = Clock(self.db)
+        top.addWidget(self.clock)
         top.addWidget(self.mode)
         work_box.addLayout(top)
         self.stack = QStackedWidget()
@@ -202,7 +208,7 @@ class Window(QMainWindow):
         outer.addWidget(work, 1)
         self.setCentralWidget(root)
         self.statusBar().setSizeGripEnabled(False)
-        for text, cls in PAGES:
+        for _key, text, cls in PAGES:
             item = QListWidgetItem(text)
             item.setSizeHint(QSize(165, 36))
             self.navigation.addItem(item)
@@ -229,11 +235,18 @@ class Window(QMainWindow):
     def open_page(self, index):
         if index >= 0:
             self.stack.setCurrentIndex(index)
-            self.title.setText(PAGES[index][0])
+            self.title.setText(PAGES[index][1])
+            self.mode.setVisible(index != PAGE_INDEX["chat"])
             self.guard(self.stack.currentWidget().refresh)
 
+    def navigate(self, key):
+        self.navigation.setCurrentRow(PAGE_INDEX[key])
+
+    def page(self, key):
+        return self.stack.widget(PAGE_INDEX[key])
+
     def new_post(self, video_id):
-        self.navigation.setCurrentRow(4)
+        self.navigate("posts")
         self.stack.currentWidget().new(video_id)
 
     def data_folder(self, name):
@@ -242,7 +255,7 @@ class Window(QMainWindow):
         return folder
 
     def open_chat_settings(self):
-        self.navigation.setCurrentRow(9)
+        self.navigate("settings")
         self.stack.currentWidget().tabs.setCurrentIndex(3)
 
     def guard(self, fn):
@@ -364,7 +377,18 @@ def stylesheet(dark):
     #chatUser, #chatUser QLabel {{ background:{hover}; }}
     #chatUser {{ border-radius:12px; }}
     #chatAssistant, #chatAssistant QLabel {{ background:{card}; }}
-    #chatAssistant {{ border:1px solid {border}; border-radius:12px; }}
+    #chatAssistant {{ border:0; border-radius:12px; }}
+    #chatRail, #chatRail QLabel {{ background:{card}; }}
+    #chatRail {{ border:1px solid {border}; border-radius:10px; }}
+    #chatComposer {{ background:{card}; border:1px solid {border}; border-radius:14px; }}
+    QPlainTextEdit#chatInput {{ background:transparent; border:0; padding:2px; }}
+    #chatFootnote {{ color:{muted}; font-size:11px; }}
+    #chatHero {{ font-size:29px; font-weight:700; }}
+    QPushButton#chatPrompt {{ text-align:left; background:{card}; padding:10px 12px; }}
+    QPushButton#chatPrompt:hover {{ background:{hover}; border-color:{accent}; }}
+    QPushButton#chatCopy {{ padding:3px 6px; border:0; color:{muted}; background:transparent; font-size:11px; }}
+    QPushButton#chatCopy:hover {{ color:{text}; background:{hover}; }}
+    #clockTime {{ font-size:17px; font-weight:650; }}
     QTextBrowser#chatText {{ background:transparent; border:0; padding:0; }}
     #chatCanvas {{ background:{bg}; }}
     #chatHistory {{ background:{card}; border:0; outline:0; }}

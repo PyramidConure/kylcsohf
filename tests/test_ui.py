@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,11 +9,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from creator_control.db import Database
 from creator_control.tools import sha256
 from creator_control.ui.main import Window
+from creator_control.ui.clock import Clock
 from tests.test_core import MemoryVault, account_data
 
 
@@ -32,20 +33,28 @@ class UiTest(unittest.TestCase):
             errors = []
             window.error = errors.append
             window.show()
+            self.assertEqual([window.navigation.item(i).text() for i in (0, 1)], ["Обзор", "ИИ-чат"])
             overview = window.stack.currentWidget()
             self.assertEqual(overview.next_title.text(), "Добавьте аккаунт")
             overview.next_action.click()
-            self.assertEqual(window.stack.currentIndex(), 1)
+            self.assertIs(window.stack.currentWidget(), window.page("accounts"))
+            links = overview.findChildren(QPushButton, "metricLink")
+            targets = ("accounts", "videos", "posts", "tasks", "warmup", "posts", "settings")
+            self.assertEqual(len(links), len(targets))
+            for link, target in zip(links, targets):
+                window.navigate("overview")
+                link.click()
+                self.assertIs(window.stack.currentWidget(), window.page(target))
             for index in range(window.navigation.count()):
                 window.navigation.setCurrentRow(index)
                 app.processEvents()
                 self.assertEqual(window.stack.currentIndex(), index)
-            window.navigation.setCurrentRow(1)
+            window.navigate("accounts")
             accounts = window.stack.currentWidget()
             accounts.form.set({"name": "Тестовый блог", "topic": "Наука"})
             accounts.save()
             self.assertEqual(accounts.table.rowCount(), 1)
-            window.navigation.setCurrentRow(2)
+            window.navigate("warmup")
             warmup = window.stack.currentWidget()
             self.assertEqual(warmup.table.rowCount(), 22)
             warmup.phase_buttons["research"][0].click()
@@ -60,12 +69,12 @@ class UiTest(unittest.TestCase):
             if path := os.environ.get("CCC_QA_SCREENSHOT"):
                 app.processEvents()
                 self.assertTrue(window.grab().save(path))
-            window.navigation.setCurrentRow(7)
+            window.navigate("tasks")
             tasks = window.stack.currentWidget()
             tasks.form.set({"title": "Снять выпуск"})
             tasks.add()
             self.assertEqual(tasks.table.rowCount(), 23)
-            window.navigation.setCurrentRow(0)
+            window.navigate("overview")
             self.assertEqual(window.stack.currentWidget().cards[0].text(), "1")
             db.settings({"theme": "light"})
             window.theme()
@@ -73,6 +82,25 @@ class UiTest(unittest.TestCase):
             self.assertIn("#eff3f9", app.styleSheet())
             self.assertEqual(errors, [])
             window.close()
+
+    def test_clock_city_offsets_dates_and_selection_are_saved(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as path:
+            db = Database(Path(path) / "clock.sqlite3")
+            clock = Clock(db)
+            clock.timer.stop()
+            instant = datetime(2026, 11, 5, 20, 15, 30, tzinfo=UTC)
+            for key, expected_time, expected_date in (
+                ("moscow", "23:15:30", "05.11.2026"),
+                ("petersburg", "23:15:30", "05.11.2026"),
+                ("irkutsk", "04:15:30", "06.11.2026"),
+                ("ulan_ude", "04:15:30", "06.11.2026"),
+            ):
+                clock.city.setCurrentIndex(clock.city.findData(key))
+                clock.update_clock(instant)
+                self.assertEqual((clock.time.text(), clock.date.text()), (expected_time, expected_date))
+            reopened = Clock(db)
+            reopened.timer.stop()
+            self.assertEqual(reopened.city.currentData(), "ulan_ude")
 
     def test_publication_filter_and_safe_local_check(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as path:
