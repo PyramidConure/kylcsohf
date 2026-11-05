@@ -53,6 +53,23 @@ CREATE TABLE IF NOT EXISTS metrics (
 PRAGMA user_version = 1;
 """
 
+CHAT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS chats (
+    id INTEGER PRIMARY KEY, title TEXT NOT NULL,
+    account_id INTEGER REFERENCES accounts(id), created TEXT NOT NULL, updated TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id),
+    role TEXT NOT NULL CHECK(role IN ('user','assistant')), body TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('pending','completed','failed')),
+    error TEXT NOT NULL DEFAULT '', reply_to INTEGER UNIQUE REFERENCES chat_messages(id),
+    created TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS chat_pending_turn ON chat_messages(chat_id)
+    WHERE role='user' AND state='pending';
+PRAGMA user_version = 2;
+"""
+
 ACCOUNT_FIELDS = ("platform", "name", "profile", "created", "start", "kind", "topic", "country",
                   "language", "timezone", "duration", "owner", "emulator", "subtopics", "keywords",
                   "ideas", "prep_override")
@@ -82,8 +99,10 @@ class Database:
             if version == 0:
                 cx.execute("PRAGMA journal_mode=WAL")
                 cx.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + "\nCOMMIT;")
-            elif version != 1:
+            elif version not in (1, 2):
                 raise ValueError(f"Версия базы {version} не поддерживается.")
+            if version < 2:
+                cx.executescript("BEGIN IMMEDIATE;\n" + CHAT_SCHEMA + "\nCOMMIT;")
 
     @contextmanager
     def connect(self):
@@ -379,7 +398,7 @@ def restore_database(backup, destination):
     try:
         source = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
         try:
-            if (source.execute("PRAGMA user_version").fetchone()[0] != 1 or
+            if (source.execute("PRAGMA user_version").fetchone()[0] not in (1, 2) or
                     source.execute("PRAGMA integrity_check").fetchone()[0] != "ok"):
                 raise ValueError("Выберите целую резервную копию Creator Control Center.")
             target = sqlite3.connect(temporary)
@@ -399,6 +418,8 @@ def restore_database(backup, destination):
                                      OR (state='failed' AND remote_id IS NULL) RETURNING id""", (result,))
             for row in affected.fetchall():
                 restored._journal(cx, row["id"], result)
+            cx.execute("""UPDATE chat_messages SET state='failed',error='Запрос прерван восстановлением базы.'
+                          WHERE state='pending'""")
         temporary.rename(destination)
     except sqlite3.DatabaseError:
         raise ValueError("Файл не является резервной копией Creator Control Center.") from None

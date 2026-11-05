@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtWidgets import QFileDialog, QSplitter, QVBoxLayout, QWidget
@@ -58,7 +59,8 @@ class Videos(Page):
 
     def add(self):
         formats = " ".join("*" + suffix for suffix in sorted(VIDEO_EXTENSIONS))
-        files, _ = QFileDialog.getOpenFileNames(self, "Импорт видео", "", f"Видео ({formats})")
+        files, _ = QFileDialog.getOpenFileNames(self, "Импорт видео", str(self.window.data_folder("media")),
+                                               f"Видео ({formats})")
         if not files:
             return
         directory = self.db.setting("ffmpeg")
@@ -99,7 +101,7 @@ class Videos(Page):
         video = self.video()
         formats = " ".join("*" + suffix for suffix in sorted(VIDEO_EXTENSIONS))
         path, _ = QFileDialog.getOpenFileName(self, "Укажите перемещённое видео",
-                                             str(Path(video["path"]).parent), f"Видео ({formats})")
+                                             str(self.window.data_folder("media")), f"Видео ({formats})")
         if not path:
             return
         if Path(path).suffix.lower() not in VIDEO_EXTENSIONS:
@@ -111,7 +113,7 @@ class Videos(Page):
     def convert(self):
         source = self.video()["path"]
         file, _ = QFileDialog.getSaveFileName(self, "Новый MP4 9:16",
-                                             str(Path(source).with_stem(Path(source).stem + "-9x16").with_suffix(".mp4")),
+                                             str(self.window.data_folder("media") / (Path(source).stem + "-9x16.mp4")),
                                              "Видео MP4 (*.mp4)")
         if not file:
             return
@@ -201,7 +203,9 @@ class Emulators(Page):
 
     def screenshot(self):
         index = self.selected().index
-        file, _ = QFileDialog.getSaveFileName(self, "Сохранить снимок тестовой сессии", "",
+        name = f"ldplayer-{index}-{datetime.now():%Y%m%d-%H%M%S}.png"
+        file, _ = QFileDialog.getSaveFileName(self, "Сохранить снимок тестовой сессии",
+                                             str(self.window.data_folder("screenshots") / name),
                                              "Снимок PNG (*.png)")
         if not file:
             return

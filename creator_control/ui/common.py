@@ -1,4 +1,6 @@
-from PySide6.QtCore import QDate, QDateTime, QLocale, Qt
+import logging
+
+from PySide6.QtCore import QDate, QDateTime, QLocale, QObject, QRunnable, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPalette, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView, QCalendarWidget, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit,
@@ -6,6 +8,32 @@ from PySide6.QtWidgets import (
     QScrollArea, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
+
+class WorkerSignals(QObject):
+    completed = Signal(object)
+    error = Signal(str)
+
+
+class Worker(QRunnable):
+    def __init__(self, activity, fn):
+        super().__init__()
+        self.activity = activity
+        self.fn = fn
+        self.signals = WorkerSignals()
+
+    def run(self):
+        log = logging.getLogger("creator_control")
+        try:
+            result = self.fn()
+        except (ValueError, OSError) as exc:
+            log.warning("%s | %s", self.activity, type(exc).__name__)
+            self.signals.error.emit(str(exc))
+        except Exception as exc:
+            log.error("%s | %s", self.activity, type(exc).__name__)
+            self.signals.error.emit(f"Внутренняя ошибка ({type(exc).__name__}).")
+        else:
+            log.info("%s | завершено", self.activity)
+            self.signals.completed.emit(result)
 
 
 def label(text, style=None):

@@ -9,6 +9,7 @@ from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .credentials import Vault
+from .chat import ChatStore
 from .db import Database, restore_database
 from .ui.main import Window
 
@@ -32,6 +33,7 @@ def main():
         if args.restore:
             restore_database(args.restore, database_path)
         db = Database(database_path)
+        ChatStore(db).recover()
         handler = RotatingFileHandler(root / "activity.log", maxBytes=1_000_000, backupCount=2,
                                       encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))

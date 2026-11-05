@@ -1,7 +1,7 @@
 from datetime import date
 import logging
 
-from PySide6.QtCore import QObject, QRunnable, QSize, QThreadPool, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QSize, QThreadPool, QTimer, Qt, Slot
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QListWidget, QListWidgetItem,
@@ -9,39 +9,14 @@ from PySide6.QtWidgets import (
 )
 
 from .accounts import Accounts, Warmup, task_rows
-from .common import Fields, Page, Table, button, choices, label, required, surface, toolbar
+from .common import Fields, Page, Table, Worker, button, choices, label, required, surface, toolbar
+from .chat import Chat
 from .library import Emulators, Videos
 from .operations import Analytics, Posts
 from .settings import Settings
 from ..db import now
 
 LOG = logging.getLogger("creator_control")
-
-
-class WorkerSignals(QObject):
-    completed = Signal(object)
-    error = Signal(str)
-
-
-class Worker(QRunnable):
-    def __init__(self, activity, fn):
-        super().__init__()
-        self.activity = activity
-        self.fn = fn
-        self.signals = WorkerSignals()
-
-    def run(self):
-        try:
-            result = self.fn()
-        except (ValueError, OSError) as exc:
-            LOG.warning("%s | %s", self.activity, type(exc).__name__)
-            self.signals.error.emit(str(exc))
-        except Exception as exc:
-            LOG.error("%s | %s", self.activity, type(exc).__name__)
-            self.signals.error.emit(f"Внутренняя ошибка ({type(exc).__name__}).")
-        else:
-            LOG.info("%s | завершено", self.activity)
-            self.signals.completed.emit(result)
 
 
 class Overview(Page):
@@ -91,7 +66,7 @@ class Overview(Page):
         side.addWidget(next_card)
         quick, box = surface()
         box.addWidget(label("БЫСТРЫЙ ДОСТУП", "eyebrow"))
-        for title, page in (("Подготовка Instagram", 2), ("Новая публикация", 4), ("Проверка подключения", 8)):
+        for title, page in (("Подготовка Instagram", 2), ("Новая публикация", 4), ("Проверка подключения", 9)):
             link = button(title + "  ›", lambda p=page: self.quick_open(p))
             link.setObjectName("metricLink")
             box.addWidget(link)
@@ -104,7 +79,7 @@ class Overview(Page):
         current = self.window.stack.currentWidget()
         if page == 4:
             current.new()
-        elif page == 8:
+        elif page == 9:
             current.tabs.setCurrentIndex(2)
 
     def refresh(self):
@@ -176,7 +151,7 @@ class Tasks(Page):
 PAGES = (
     ("Обзор", Overview), ("Аккаунты", Accounts), ("Прогрев Instagram", Warmup), ("Видео", Videos),
     ("Публикации", Posts), ("Аналитика", Analytics), ("Эмуляторы", Emulators), ("Задачи", Tasks),
-    ("Настройки", Settings),
+    ("ИИ-чат", Chat), ("Настройки", Settings),
 )
 
 
@@ -261,6 +236,15 @@ class Window(QMainWindow):
         self.navigation.setCurrentRow(4)
         self.stack.currentWidget().new(video_id)
 
+    def data_folder(self, name):
+        folder = self.db.path.parent / name
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def open_chat_settings(self):
+        self.navigation.setCurrentRow(9)
+        self.stack.currentWidget().tabs.setCurrentIndex(3)
+
     def guard(self, fn):
         try:
             fn()
@@ -325,7 +309,7 @@ class Window(QMainWindow):
         self.error(message)
 
     def closeEvent(self, event):
-        if self.worker:
+        if self.worker or any(getattr(self.stack.widget(i), "busy", False) for i in range(self.stack.count())):
             self.notice("Дождитесь завершения операции.")
             event.ignore()
         else:
@@ -349,6 +333,7 @@ class Window(QMainWindow):
         test_mode = self.db.setting("test_mode", "1") != "0"
         self.mode.setProperty("live", "false" if test_mode else "true")
         self.mode.setText("●  Тестовый режим" if test_mode else "●  Реальные операции")
+        self.mode.setToolTip("Режим отправки публикаций. Сообщения ИИ-чата отправляются в OpenAI по нажатию «Отправить».")
         self.mode.style().unpolish(self.mode)
         self.mode.style().polish(self.mode)
 
@@ -376,6 +361,15 @@ def stylesheet(dark):
     #tableEmpty {{ background:transparent; }}
     #card, #card QLabel {{ background:{card}; }}
     #card {{ border:1px solid {border}; border-radius:10px; }}
+    #chatUser, #chatUser QLabel {{ background:{hover}; }}
+    #chatUser {{ border-radius:12px; }}
+    #chatAssistant, #chatAssistant QLabel {{ background:{card}; }}
+    #chatAssistant {{ border:1px solid {border}; border-radius:12px; }}
+    QTextBrowser#chatText {{ background:transparent; border:0; padding:0; }}
+    #chatCanvas {{ background:{bg}; }}
+    #chatHistory {{ background:{card}; border:0; outline:0; }}
+    #chatHistory::item {{ padding:9px 8px; border-radius:6px; }}
+    #chatHistory::item:selected {{ background:{hover}; }}
     #card QCheckBox {{ background:transparent; }}
     #navigation {{ border:0; outline:0; }}
     #navigation::item {{ padding:4px 8px; border-radius:6px; border-left:3px solid transparent; }}

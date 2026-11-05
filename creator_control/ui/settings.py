@@ -1,10 +1,12 @@
 import re
+import webbrowser
 from datetime import date
 from pathlib import Path
 
 from PySide6.QtWidgets import QFileDialog, QTabWidget, QVBoxLayout, QWidget
 
 from ..db import https_url
+from ..chat import DEFAULT_MODEL, KEY_NAME
 from ..tools import network_check
 from .common import Fields, Page, button, label, scroll, toolbar
 
@@ -68,6 +70,26 @@ class Settings(Page):
         security.addStretch(1)
         self.tabs.addTab(scroll(panel), "Безопасность подключения")
         self.previous_ip = {}
+        panel = QWidget()
+        chat_box = QVBoxLayout(panel)
+        chat_box.addWidget(label("Подключение ИИ-чата", "section"))
+        chat_box.addWidget(label("Запросы отправляются в OpenAI и используют баланс вашего API-проекта. "
+                                 "В новой беседе можно явно выбрать контекст аккаунта.", "muted"))
+        self.chat_form = Fields()
+        self.chat_form.add("key", "OpenAI API-ключ", "secret").setPlaceholderText("Пустое поле сохраняет текущий ключ")
+        self.chat_form.add("model", "Модель").setPlaceholderText(DEFAULT_MODEL)
+        self.chat_form.add("limit", "Лимит токенов ответа", "int", (256, 16000))
+        chat_box.addWidget(self.chat_form)
+        self.chat_status = label("", "muted")
+        chat_box.addWidget(self.chat_status)
+        chat_box.addLayout(toolbar(button("Сохранить", self.guard(self.save_chat), True),
+                                   button("Удалить ключ", self.guard(self.remove_chat_key))))
+        chat_box.addLayout(toolbar(button("Открыть страницу API-ключей",
+                                         lambda: webbrowser.open("https://platform.openai.com/api-keys"))))
+        chat_box.addWidget(label("История чатов хранится в локальной базе, ключ — в Windows Credential Manager.",
+                                 "muted"))
+        chat_box.addStretch(1)
+        self.tabs.addTab(scroll(panel), "ИИ-чат")
 
     def refresh(self):
         self.form.set({key: self.db.setting(key) for key in ("ldplayer",)})
@@ -79,10 +101,35 @@ class Settings(Page):
             if platform == "Instagram":
                 values.update(redirect=config.get("redirect", ""), meta_version=self.db.setting("meta_version"))
             form.set(values)
+        self.chat_form.set({"key": "", "model": self.db.setting("chat_model", DEFAULT_MODEL),
+                            "limit": int(self.db.setting("chat_output_limit", "4096"))})
+        self.chat_status.setText("API-ключ сохранён." if self.vault.get(KEY_NAME) else "API-ключ пока не добавлен.")
+
+    def save_chat(self):
+        data = self.chat_form.values()
+        model = data["model"].strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,100}", model):
+            raise ValueError("Укажите корректное имя модели.")
+        key = data["key"]
+        if key and (len(key) < 20 or any(c.isspace() for c in key)):
+            raise ValueError("Проверьте API-ключ. Он должен быть без пробелов и переносов строки.")
+        if key:
+            self.vault.put(KEY_NAME, key)
+        self.db.settings({"chat_model": model, "chat_output_limit": str(data["limit"])})
+        self.chat_form.widget("key").clear()
+        self.chat_status.setText("API-ключ сохранён." if self.vault.get(KEY_NAME) else "API-ключ пока не добавлен.")
+        self.window.notice("Настройки ИИ-чата сохранены.")
+
+    def remove_chat_key(self):
+        if self.window.confirm("Удалить API-ключ", "Удалить сохранённый OpenAI API-ключ с этого компьютера?"):
+            self.vault.remove(KEY_NAME)
+            self.chat_status.setText("API-ключ удалён.")
+            self.window.notice("Ключ удалён из Windows Credential Manager.")
 
     def directory(self, key):
         fields = self.ffmpeg if key == "ffmpeg" else self.form
-        result = QFileDialog.getExistingDirectory(self, "Выберите папку", fields.values()[key])
+        initial = fields.values()[key] or str(self.db.path.parent.parent)
+        result = QFileDialog.getExistingDirectory(self, "Выберите папку", initial)
         if result:
             fields.set({key: result})
 
@@ -125,7 +172,8 @@ class Settings(Page):
 
     def backup(self):
         file, _ = QFileDialog.getSaveFileName(self, "Резервная копия SQLite",
-                                             f"ccc-{date.today().isoformat()}.sqlite3", "SQLite (*.sqlite3)")
+                                             str(self.window.data_folder("backups") / f"ccc-{date.today().isoformat()}.sqlite3"),
+                                             "SQLite (*.sqlite3)")
         if file:
             self.window.job("Резервное копирование SQLite", lambda: self.db.backup(file),
                             lambda result: self.window.notice(f"Копия проверена: {result}"))

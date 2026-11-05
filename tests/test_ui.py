@@ -36,7 +36,7 @@ class UiTest(unittest.TestCase):
             self.assertEqual(overview.next_title.text(), "Добавьте аккаунт")
             overview.next_action.click()
             self.assertEqual(window.stack.currentIndex(), 1)
-            for index in range(9):
+            for index in range(window.navigation.count()):
                 window.navigation.setCurrentRow(index)
                 app.processEvents()
                 self.assertEqual(window.stack.currentIndex(), index)
