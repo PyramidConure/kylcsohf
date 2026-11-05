@@ -6,9 +6,9 @@ from pathlib import Path
 from PySide6.QtWidgets import QFileDialog, QTabWidget, QVBoxLayout, QWidget
 
 from ..db import https_url
-from ..chat import DEFAULT_MODEL, KEY_NAME, remember_models, validate_model
+from ..chat import DEFAULT_MODEL, KEY_NAME, remember_models, saved_models, validate_model
 from ..tools import network_check
-from .common import Fields, Page, button, label, scroll, toolbar
+from .common import Fields, Page, button, choices, label, scroll, toolbar
 
 
 class Settings(Page):
@@ -77,7 +77,7 @@ class Settings(Page):
                                  "В новой беседе можно явно выбрать контекст аккаунта.", "muted"))
         self.chat_form = Fields()
         self.chat_form.add("key", "OpenAI API-ключ", "secret").setPlaceholderText("Пустое поле сохраняет текущий ключ")
-        self.chat_form.add("model", "Модель").setPlaceholderText(DEFAULT_MODEL)
+        self.chat_form.add("model", "Модель", "choice", [(DEFAULT_MODEL, DEFAULT_MODEL)]).setEditable(True)
         self.chat_form.add("limit", "Лимит токенов ответа", "int", (256, 16000))
         chat_box.addWidget(self.chat_form)
         self.chat_status = label("", "muted")
@@ -101,13 +101,15 @@ class Settings(Page):
             if platform == "Instagram":
                 values.update(redirect=config.get("redirect", ""), meta_version=self.db.setting("meta_version"))
             form.set(values)
+        choices(self.chat_form.widget("model"), ((model, model) for model in dict.fromkeys(
+            [DEFAULT_MODEL, *saved_models(self.db)])), selected=self.db.setting("chat_model", DEFAULT_MODEL))
         self.chat_form.set({"key": "", "model": self.db.setting("chat_model", DEFAULT_MODEL),
                             "limit": int(self.db.setting("chat_output_limit", "4096"))})
         self.chat_status.setText("API-ключ сохранён." if self.vault.get(KEY_NAME) else "API-ключ пока не добавлен.")
 
     def save_chat(self):
         data = self.chat_form.values()
-        model = validate_model(data["model"].strip())
+        model = validate_model(self.chat_form.widget("model").currentText().strip())
         key = data["key"]
         if key and (len(key) < 20 or any(c.isspace() for c in key)):
             raise ValueError("Проверьте API-ключ. Он должен быть без пробелов и переносов строки.")

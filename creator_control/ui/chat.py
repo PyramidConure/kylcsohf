@@ -5,11 +5,12 @@ from PySide6.QtCore import QByteArray, QThreadPool, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QProgressBar,
-    QScrollArea, QSplitter, QTextBrowser, QVBoxLayout, QWidget,
+    QScrollArea, QSplitter, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from ..chat import ChatService, ChatStore, DEFAULT_MODEL, KEY_NAME, chat_config, remember_models, saved_models, validate_model
 from .common import Page, Worker, button, choices, label, surface
+from .registration import RegistrationPanel
 
 
 class Composer(QPlainTextEdit):
@@ -91,6 +92,7 @@ class Chat(Page):
         self.auto_scroll = True
         self.rendered = None
         self.configured = False
+        self.preparation_open = self.db.setting("chat_tools_visible", "0") == "1"
         self.last_text = ""
         self.split = QSplitter()
         self.split.setChildrenCollapsible(False)
@@ -100,6 +102,7 @@ class Chat(Page):
         self.rail.setMaximumWidth(245)
         self.new_button = button("＋  Новая беседа", self.guard(self.new_chat), True)
         rail_box.addWidget(self.new_button)
+        rail_box.addWidget(button("Аккаунты и материалы", self.guard(lambda: self.show_registration(True))))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск в чатах")
         self.search.setClearButtonEnabled(True)
@@ -169,14 +172,21 @@ class Chat(Page):
         self.messages.setContentsMargins(12, 12, 12, 12)
         self.messages.setSpacing(16)
         self.scroll.setWidget(self.canvas)
-        center.addWidget(self.scroll, 1)
+        self.contents = QStackedWidget()
+        self.contents.addWidget(self.scroll)
+        self.registration = RegistrationPanel(window)
+        self.registration.layout.insertWidget(0, button("← Вернуться в переписку", lambda: self.show_registration(False)))
+        self.contents.addWidget(self.registration)
+        center.addWidget(self.contents, 1)
         self.connection = label("", "muted")
         self.configure_button = button("Подключить OpenAI", self.window.open_chat_settings)
-        notice = QHBoxLayout()
+        self.chat_notice = QWidget()
+        notice = QHBoxLayout(self.chat_notice)
+        notice.setContentsMargins(0, 0, 0, 0)
         notice.addWidget(self.connection, 1)
         notice.addWidget(self.configure_button)
-        center.addLayout(notice)
-        composer, box = surface("chatComposer")
+        center.addWidget(self.chat_notice)
+        self.composer, box = surface("chatComposer")
         self.editor = Composer()
         self.editor.setObjectName("chatInput")
         self.editor.setPlaceholderText("Сообщение…")
@@ -186,6 +196,11 @@ class Chat(Page):
         self.editor.submitted.connect(self.guard(self.send))
         box.addWidget(self.editor)
         footer = QHBoxLayout()
+        self.plus_button = button("＋", self.show_tools)
+        self.plus_button.setFixedWidth(34)
+        self.plus_button.setAccessibleName("Агенты и инструменты чата")
+        self.plus_button.setToolTip("Агент подготовки аккаунтов и материалы")
+        footer.addWidget(self.plus_button)
         self.account = QComboBox()
         self.account.setMinimumContentsLength(11)
         self.account.setMaximumWidth(225)
@@ -206,7 +221,7 @@ class Chat(Page):
         self.send_button.setToolTip("Отправить · Enter")
         footer.addWidget(self.send_button)
         box.addLayout(footer)
-        center.addWidget(composer)
+        center.addWidget(self.composer)
         self.context = label("", "chatFootnote")
         center.addWidget(self.context)
         self.progress = QProgressBar()
@@ -229,7 +244,39 @@ class Chat(Page):
             shortcut.activated.connect(callback)
             self.shortcuts.append(shortcut)
 
+    def show_tools(self):
+        menu = QMenu(self.plus_button)
+        agent = menu.addAction("Агент подготовки и регистрации…")
+        materials = menu.addAction("Материалы выбранного аккаунта…")
+        menu.addSeparator()
+        new = menu.addAction("Новая беседа")
+        selected = menu.exec(self.plus_button.mapToGlobal(self.plus_button.rect().topLeft()))
+        if selected in (agent, materials):
+            self.show_registration(True, self.account.currentData())
+        elif selected == new:
+            self.window.guard(self.new_chat)
+
+    def show_registration(self, visible=True, account_id=None):
+        self.flush_draft()
+        self.preparation_open = visible
+        self.db.settings({"chat_tools_visible": "1" if visible else "0"})
+        if visible:
+            self.registration.refresh(account_id or self.account.currentData())
+        self.apply_mode()
+
+    def apply_mode(self):
+        self.contents.setCurrentWidget(self.registration if self.preparation_open else self.scroll)
+        self.rail.setVisible(not self.preparation_open and self.history_toggle.isChecked())
+        self.composer.setVisible(not self.preparation_open)
+        self.context.setVisible(not self.preparation_open)
+        self.chat_notice.setVisible(not self.preparation_open)
+        self.thread_title.setVisible(not self.preparation_open)
+        self.latest_button.setVisible(not self.preparation_open and
+                                      self.scroll.verticalScrollBar().maximum() - self.scroll.verticalScrollBar().value() > 24)
+
     def toggle_history(self):
+        if self.preparation_open:
+            self.show_registration(False)
         self.rail.setVisible(self.history_toggle.isChecked())
         self.db.settings({"chat_history_visible": "1" if self.history_toggle.isChecked() else "0"})
 
@@ -249,7 +296,9 @@ class Chat(Page):
     def update_composer(self):
         length = len(self.editor.toPlainText())
         self.counter.setText(f"{length:,} / 16 000".replace(",", " ") if length else "")
-        self.send_button.setEnabled(self.configured and not self.busy and
+        local_command = self.editor.toPlainText().strip().casefold() in {
+            "/аккаунты", "/регистрация", "/материалы", "/accounts"}
+        self.send_button.setEnabled((self.configured or local_command) and not self.busy and
                                     0 < len(self.editor.toPlainText().strip()) <= 16_000)
         self.editor.fit_height()
 
@@ -345,11 +394,14 @@ class Chat(Page):
         self.export_button.setEnabled(self.chat_id is not None and not self.busy)
         self.history_toggle.setChecked(self.db.setting("chat_history_visible", "1") != "0")
         self.rail.setVisible(self.history_toggle.isChecked())
-        self.connection.setText("" if configured else "Добавьте API-ключ, чтобы получать ответы.")
+        self.connection.setText("" if configured else "Для ответов нужен API-ключ. /аккаунты работает без ключа.")
         self.connection.setVisible(not configured)
         self.configure_button.setVisible(not configured)
         self.update_context()
         self.show_messages()
+        if self.preparation_open:
+            self.registration.refresh()
+        self.apply_mode()
 
     def select_model(self):
         if self.busy:
@@ -382,6 +434,7 @@ class Chat(Page):
             raise ValueError("Дождитесь ответа.")
         self.flush_draft()
         self.chat_id = None
+        self.draft_model = self.db.setting("chat_model", DEFAULT_MODEL)
         draft = self.store.draft(None)
         self.draft_account = draft["account_id"]
         self.editor.setPlainText(draft["body"])
@@ -396,6 +449,8 @@ class Chat(Page):
         if account is None:
             raise ValueError("Аккаунт не найден.")
         self.flush_draft()
+        self.preparation_open = False
+        self.db.settings({"chat_tools_visible": "0"})
         chat = self.db.get("SELECT id FROM chats WHERE account_id=? ORDER BY updated DESC,id DESC", account_id)
         self.chat_id = chat["id"] if chat else self.store.create(account_id)
         if chat is None:
@@ -508,6 +563,11 @@ class Chat(Page):
     def send(self):
         text = self.editor.toPlainText().strip()
         if self.busy or not text:
+            return
+        if text.casefold() in {"/аккаунты", "/регистрация", "/материалы", "/accounts"}:
+            self.editor.clear()
+            self.flush_draft()
+            self.show_registration(True)
             return
         chat_config(self.db, self.vault)
         self.select_model()

@@ -263,6 +263,10 @@ class Window(QMainWindow):
         self.page("chat").open_account(account_id)
         self.navigate("chat")
 
+    def open_account_setup(self, account_id):
+        self.navigate("chat")
+        self.page("chat").show_registration(True, account_id)
+
     def guard(self, fn):
         try:
             fn()

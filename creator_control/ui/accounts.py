@@ -228,8 +228,10 @@ class Warmup(Page):
         self.ld = button("Открыть в LDPlayer", self.guard(self.open_app))
         self.ai = button("ИИ-план", self.guard(lambda: self.window.open_account_chat(
             required(self.account.currentData(), "аккаунт"))))
+        self.materials = button("Материалы", self.guard(lambda: self.window.open_account_setup(
+            required(self.account.currentData(), "аккаунт"))))
         self.add_account = button("Добавить аккаунт", lambda: self.window.navigate("accounts"), True)
-        self.layout.addLayout(toolbar(self.account, self.ld, self.ai, self.add_account))
+        self.layout.addLayout(toolbar(self.account, self.ld, self.ai, self.materials, self.add_account))
         progress_card, progress_box = surface()
         self.layout.addWidget(progress_card)
         heading = QHBoxLayout()
@@ -318,6 +320,7 @@ class Warmup(Page):
         self.add_account.setVisible(account is None)
         self.account.setEnabled(account is not None)
         self.ai.setEnabled(account is not None)
+        self.materials.setEnabled(account is not None)
         self.ld.setVisible(account is not None)
         self.ld.setEnabled(bool(account and account["emulator"] is not None and self.db.setting("ldplayer")))
         self.ld.setToolTip("Укажите папку LDPlayer в настройках и его индекс в карточке аккаунта.")

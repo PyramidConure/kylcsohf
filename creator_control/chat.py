@@ -7,7 +7,7 @@ import sqlite3
 from .db import now
 from .platforms import APIError, Transport
 
-DEFAULT_MODEL = "gpt-5.4-mini"
+DEFAULT_MODEL = "gpt-6.1-sol"
 KEY_NAME = "chat/openai"
 INSTRUCTIONS = (
     "Ты ИИ-помощник Creator Control Center. Помогай автору с идеями, сценариями, "
@@ -158,7 +158,7 @@ def saved_models(db):
     if not isinstance(saved, list):
         saved = []
     rows = db.query("SELECT model FROM chats UNION SELECT model FROM chat_messages")
-    values = [db.setting("chat_model", DEFAULT_MODEL), *saved, *(row["model"] for row in rows)]
+    values = [DEFAULT_MODEL, db.setting("chat_model", DEFAULT_MODEL), *saved, *(row["model"] for row in rows)]
     return list(dict.fromkeys(value for value in values if isinstance(value, str) and
                               re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,100}", value)))
 
